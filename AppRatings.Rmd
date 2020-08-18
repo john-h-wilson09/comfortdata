@@ -1,0 +1,253 @@
+---
+title: "AppRatings"
+author: "John Wilson"
+date: "8/17/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+**Executive Summary**
+
+People are attached to their technology devices more and more every year which leads to them looking for more apps. Often times these apps are for increase in productivity and other times for stress relief in forms of games and other things. By analyzing this data set, it can be determined what is more important in a good rating and where there may be a shortage of available apps. 6 different models were trained on this data before doing a final confirmation on the data set. The Category+Genre effects analysis proved to be the best model with an RMSE of 0.512 and a final RMSE on the validation set of 0.521. By the increase in RMSE from training to validation, it could be interpreted as over trained.
+
+**Data Preparation and Review**
+
+This data was downloaded from kaggle and came in a rather tidy format already. The data came all in one file and was prepared to be reviewed.
+```{r include=TRUE, message=FALSE, warning=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(recosystem)
+library(knitr)
+
+# https://www.kaggle.com/gauthamp10/google-playstore-apps
+
+dl <- tempfile()
+download.file("https://github.com/john-h-wilson09/comfortdata/raw/master/androidapps.zip", dl)
+
+dat <- read.csv(unzip(dl,"googleplaystore.csv"))
+rm(dl)
+
+str(dat) #13 variables, last four variables appear useless
+sum(is.na(dat)) #checking for NAs, many missing values
+dat1 <- na.omit(dat) #remove NAs
+```
+
+From the lines of code above several NA values were noted and then removed to prevent any analysis errors. This data set included over 8000 different apps in the Google playstore in 116 different genres.
+```{r include=TRUE}
+# Number of unique apps
+length(unique(dat1$App))
+```
+
+```{r include=TRUE}
+# Number of unique genres
+length(unique(dat1$Genres))
+```
+
+Looking deeper into the applications, it is discovered that most apps are free or under $3. 
+```{r include=TRUE, message=FALSE}
+dat1 %>% group_by(Price) %>% summarize(n=n()) %>% 
+  arrange(desc(n)) %>% head(10) #most apps are free or under $3
+```
+
+As it would be expected not all apps have nearly the same amount of installs and consequently varying amounts of reviews. Note that most apps have less than 5 reviews and a rating in the range of 4.3-4.5
+```{r echo=FALSE, message=FALSE}
+dat1 %>% group_by(Reviews) %>% summarize(n=n()) %>% 
+  arrange(desc(n)) %>% head(10) #most apps have less than 5 reviews
+```
+
+```{r include=TRUE, message=FALSE}
+dat1 %>% group_by(Rating) %>% summarize(n=n()) %>% arrange(desc(n)) %>%
+  head(5) #most apps are rated 4.3-4.5
+```
+
+The table below will also display the various categories that represent the top installs. Not coincidentally, most of the top installed applications in the Google play store are Google apps that are installed by default on the android platform.
+```{r include=TRUE, message=FALSE}
+# Seeing the top installed apps
+dat1 %>% arrange(desc(Installs)) %>% tail(10) %>% select(App,Category,Rating,Reviews,Installs,Price)
+
+```
+
+The applications that appear most often and therefore, have the highest competition are in the family and game sectors. By the chart and table, it is easily seen the different levels of activity in categories
+```{r echo=FALSE, message=FALSE}
+dat1 %>% count(Category) %>% ggplot(aes(n)) + geom_histogram(color="black") + 
+  labs(title = "Category", x="") #not all categories are equally represented
+```
+
+```{r include=TRUE, message=FALSE}
+dat1 %>% group_by(Category) %>% summarize(n=n()) %>% arrange(desc(n)) %>%
+  head(5) #top 5 categories for playstore apps
+```
+
+With a quick plot of reviews vs ratings, an outlier could seen. The outlier was filtered out by only keeping ratings of 5 or less. Also the chart does not display there being any relationship between the number of reviews and ratings.
+```{r echo=FALSE}
+qplot(dat1$Rating,dat1$Reviews) #no relationship noticed between number of reviews and rating
+```
+
+```{r}
+dat1 <- dat1 %>% filter(Rating<6) #filter out outlier
+```
+
+To provide data for the training and validation of models the data was split into practice and validation sets. 15% of the data points were set aside for validation and then it was confirmed that the categories and genres in validation existed in the practice set.
+```{r message=FALSE, warning=FALSE}
+# Dividing the data to have a practice set and and validation set
+set.seed(15,sample.kind = "Rounding")
+valid_index <- createDataPartition(dat1$Rating,times = 1,list = FALSE,p=0.15)
+practice <- dat1[-valid_index,]
+validation <- dat1[valid_index,]
+
+# Making sure valid set info is in practice set also
+validation <- validation %>% semi_join(practice, by = "Genres") %>% semi_join(practice, by = "Category")
+```
+
+The practice data set was further dissected into training and testing sets with only 20% of the set being placed in the test set. Again, it was confirmed that the genres and categories in the test set also existed in the training set.
+```{r}
+# Dividing the practice set to have data to train and test with
+test_index <- createDataPartition(practice$Rating,times = 1,list = FALSE,p=0.2)
+train_set <- practice[-test_index,]
+test_set <- practice[test_index,]
+
+# Making sure the test set info is also in the train set
+test_set <- test_set %>% semi_join(train_set, by = "Genres") %>% semi_join(train_set, by = "Category")
+```
+
+Now that the data has been reviewed thoroughly and divided up for analysis, processing can begin.
+
+**Technical Analysis**
+
+The first approach was to just apply the average from the train set to the test set, as a 'naive' approach. Root mean square error(RMSE) will be used as a grade for best model, thus a table was created to store the results from each model in.
+```{r warning=FALSE, message=FALSE}
+mu <- mean(train_set$Rating)
+avg_pred <- rep(mu,length(test_set$Rating))
+avg_rmse <- RMSE(avg_pred,test_set$Rating)
+RMSE_result0 <- data_frame(Model = "Naive-Avg", RMSE = avg_rmse) #create table for results
+```
+
+As stated previously in this report, categories and genres are not all evenly represented so there could be a bias there. Most visitors to the app store are usually looking for an app within a sector for a purpose so some genres and categories are likely graded harder. In addition to genres and categories, another analysis was performed to access a content rating bias.
+```{r warning=FALSE, message=FALSE}
+cat_avg <- train_set %>% group_by(Category) %>% summarize(b_c=mean(Rating-mu))
+cat_pred <- test_set %>% left_join(cat_avg,by='Category') %>%
+  mutate(pred=mu+b_c) %>% pull(pred)
+cat_rmse <- RMSE(cat_pred,test_set$Rating)
+RMSE_result1 <- bind_rows(RMSE_result0, data_frame(Model="Category Effect Model", RMSE = cat_rmse ))
+
+genre_avg <- train_set %>% left_join(cat_avg, by='Category') %>%
+  group_by(Genres) %>% summarize(b_g=mean(Rating-mu-b_c))
+
+genre_pred <- test_set %>% left_join(cat_avg,by='Category') %>%
+  left_join(genre_avg,by='Genres') %>% mutate(pred=mu+b_c+b_g) %>%
+  pull(pred)
+genre_rmse <- RMSE(genre_pred,test_set$Rating)
+RMSE_result1 <- bind_rows(RMSE_result1, data_frame(Model="Category+Genre Effect Model", RMSE = genre_rmse ))
+
+content_avg <- train_set %>% left_join(cat_avg,by='Category') %>%
+  left_join(genre_avg,by='Genres') %>% group_by(Content.Rating) %>%
+  summarize(b_r = mean(Rating-mu-b_c-b_g))
+content_pred <- test_set %>% left_join(cat_avg,by='Category') %>%
+  left_join(genre_avg,by='Genres') %>%
+  left_join(content_avg,by='Content.Rating') %>% mutate(pred=mu+b_c+b_g+b_r) %>%
+  pull(pred)
+content_rmse <- RMSE(content_pred,test_set$Rating)
+RMSE_result1 <- bind_rows(RMSE_result1, data_frame(Model="Cat+Genre+Content Model", RMSE = content_rmse ))
+```
+
+In order to not over train or lose an unknown correlation in the data shuffle, a regularized model was tried with lambdas ranging 2 to 10.
+```{r warning=FALSE, message=FALSE}
+lambdas <- seq(2,10,0.25)
+RMSE_reg <- sapply(lambdas, function(l){
+  cat_avg <- train_set %>% group_by(Category) %>% summarize(b_c=sum(Rating-mu)/(n()+l))
+  genre_avg <- train_set %>% left_join(cat_avg, by='Category') %>%
+    group_by(Genres) %>% summarize(b_g=sum(Rating-mu-b_c)/(n()+l))
+  
+  preds <- test_set %>% left_join(cat_avg,by='Category') %>%
+    left_join(genre_avg,by='Genres') %>% mutate(pred=mu+b_c+b_g) %>%
+    pull(pred)
+  
+  RMSE(preds,test_set$Rating)
+})
+lambda <- lambdas[which.min(RMSE_reg)] #best lamda 
+RMSEreg_eff <- RMSE_reg[[which.min(RMSE_reg)]]
+RMSE_result2 <- bind_rows(RMSE_result1, data_frame(Model="Regularized Eff Model", RMSE = RMSEreg_eff ))
+
+```
+
+The final approach was to use matrix factorization. A residual data set was formed by removing all bias from the prior calculations and saving it. This model accesses the user-index interface using algorithms and 2 smaller rectangular matrices to form a correlation. Tuning parameters were provided and the best was determined from the training set to apply to the test set.
+```{r}
+# Matrix Factorization Model
+# Calculating residuals by removing movie, user and genres effect
+residual_set <- train_set %>% left_join(cat_avg,by='Category') %>%
+  left_join(genre_avg,by='Genres') %>% mutate(resid=Rating-mu-b_c-b_g) 
+
+# Setting data and tuning parameters - used R documentation for parameters
+reco <- Reco()
+train_reco <- data_memory(user_index=residual_set$Category, item_index=residual_set$Genres, 
+                          rating=residual_set$resid, index1=TRUE)
+test_reco <- data_memory(user_index=test_set$Category, item_index=test_set$Genres, index1=TRUE)
+
+# This step takes a couple of minutes
+opts <- reco$tune(train_reco, opts = list(dim = c(10,20,30,40,50), 
+                                          lrate = c(0.1, 0.2),
+                                          costp_l1=0, costq_l1=0,
+                                          nthread = 1, niter = 10))
+
+# Train the model of reco
+reco$train(train_reco, opts = c(opts$min, nthread=1, niter=20))
+
+# Predict results for the test set
+reco_pred <- reco$predict(test_reco, out_memory())
+preds <- cbind(test_set, reco_pred) %>% 
+  left_join(cat_avg,by='Category') %>% left_join(genre_avg,by='Genres') %>% 
+  mutate(pred = mu + b_c + b_g + reco_pred) %>% pull(pred)
+rmseMF <- RMSE(preds, test_set$Rating)
+RMSE_result3 <- bind_rows(RMSE_result2, data_frame(Model="Matrix Factorization", RMSE = rmseMF )) %>%
+  arrange(desc(RMSE)) #arranging RMSE from largest to smallest to see best model
+```
+
+**Results**
+
+This data set was not an astronomical size so results did not take lengthy periods of calculations. The initial model of assuming the average applies resulted in an RMSE of `r avg_rmse`. From here, the goal was to continuously improve the models each step. Next the bias models were formed and layered together. Beginning with category, then adding genre and finally content rating. Surprisingly, adding the third bias slightly increased the RMSE.
+```{r}
+kable(RMSE_result1)
+```
+
+Next, was the training of the regularized model with the various lambdas between 2 and 10. This resulted in the optimum lambda being `r lambda`. Thus far, this model became the best RMSE though by only a small margin.
+```{r echo=FALSE}
+qplot(lambdas,RMSE_reg)
+```
+
+```{r}
+kable(RMSE_result2)
+```
+
+Lastly, was the more computing intensive model of matrix factorization which took a couple minutes to run. This yielded the best RMSE of the 6 models with an RMSE of `r rmseMF`. The table below was arranged so that the best model would be on the bottom line.
+```{r}
+kable(RMSE_result3)
+```
+
+This model was then implemented with the validation data set after confirming its variables were also in the training set. The matrix factorization tuned variables were applied to this data.
+```{r}
+# Apply best model validation data
+valid <- validation %>% semi_join(train_set, by = "Genres") %>% semi_join(train_set, by = "Category") 
+valid_reco <- data_memory(user_index=valid$Category, item_index=valid$Genres, index1=TRUE)
+reco_val <- reco$predict(valid_reco, out_memory())
+valid_pred <-  cbind(valid, reco_val) %>% 
+  left_join(cat_avg,by='Category') %>% left_join(genre_avg,by='Genres') %>% 
+  mutate(vpred = mu + b_c + b_g + reco_val) %>% pull(vpred)
+valid_rmse <- RMSE(valid_pred,valid$Rating)
+```
+
+Unexpectantly, the RMSE for the validation set was above any RMSE calculated during the training of the models at an RMSE of 'r valid_rmse`.
+
+**Conclusion**
+
+More apps are being developed everyday, especially with people having more time at home and to work on ideas they previously thought they didn't have time for. This project showed the variations of apps and how they were received within the Google playstore. It would have been beneficial to have a data set including the Apple app store also to see how the data compares. Also, a bigger data set would have beeen a help. It could be considered that the models were over trained by the validation set having a higher RMSE than any of the training model RMSE. A complication that was observed was dealing with most of the variables being of the factor class and not converting easily to the numeric class; for example, the Reviews variable. Perhaps, another approach would be to have ratings of only whole and half numbers which could easily be factors to perform linear regressions on. Overall, it was a good learning experience and insightful data about the application world.
